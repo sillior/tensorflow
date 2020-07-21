@@ -19,8 +19,10 @@ from __future__ import print_function
 
 import numpy as np
 
+from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gradient_checker
@@ -36,7 +38,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
         x = np.array([1, 2, 3], dtype=dtype)
         v_tf = array_ops.broadcast_to(constant_op.constant(x), [3, 3])
         v_np = np.broadcast_to(x, [3, 3])
-        self.assertAllEqual(v_tf.eval(), v_np)
+        self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastToString(self):
@@ -44,7 +46,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
       x = np.array([b"1", b"2", b"3"])
       v_tf = array_ops.broadcast_to(constant_op.constant(x), [3, 3])
       v_np = np.broadcast_to(x, [3, 3])
-      self.assertAllEqual(v_tf.eval(), v_np)
+      self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastToBool(self):
@@ -52,7 +54,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
       x = np.array([True, False, True], dtype=np.bool)
       v_tf = array_ops.broadcast_to(constant_op.constant(x), [3, 3])
       v_np = np.broadcast_to(x, [3, 3])
-      self.assertAllEqual(v_tf.eval(), v_np)
+      self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastToShape(self):
@@ -64,7 +66,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
           x = np.array(np.random.randint(5, size=input_shape), dtype=np.int32)
           v_tf = array_ops.broadcast_to(constant_op.constant(x), output_shape)
           v_np = np.broadcast_to(x, output_shape)
-          self.assertAllEqual(v_tf.eval(), v_np)
+          self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastToShapeInnerDim(self):
@@ -74,7 +76,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
       x = np.array(np.random.randint(5, size=input_shape), dtype=np.int32)
       v_tf = array_ops.broadcast_to(constant_op.constant(x), output_shape)
       v_np = np.broadcast_to(x, output_shape)
-      self.assertAllEqual(v_tf.eval(), v_np)
+      self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastToShapeLargerDim(self):
@@ -84,7 +86,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
       x = np.array(np.random.randint(5, size=input_shape), dtype=np.int32)
       v_tf = array_ops.broadcast_to(constant_op.constant(x), output_shape)
       v_np = np.broadcast_to(x, output_shape)
-      self.assertAllEqual(v_tf.eval(), v_np)
+      self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastToShapeLargerDim2(self):
@@ -94,7 +96,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
       x = np.array(np.random.randint(5, size=input_shape), dtype=np.int32)
       v_tf = array_ops.broadcast_to(constant_op.constant(x), output_shape)
       v_np = np.broadcast_to(x, output_shape)
-      self.assertAllEqual(v_tf.eval(), v_np)
+      self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastToScalar(self):
@@ -102,7 +104,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
       x = np.array(1, dtype=np.int32)
       v_tf = array_ops.broadcast_to(constant_op.constant(x), [3, 3])
       v_np = np.broadcast_to(x, [3, 3])
-      self.assertAllEqual(v_tf.eval(), v_np)
+      self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastScalarToNonScalar(self):
@@ -111,7 +113,7 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
       v_tf = array_ops.broadcast_to(constant_op.constant(1.0), [2, 3, 4,
                                                                 1, 1, 1])
       v_np = np.broadcast_to(x, [2, 3, 4, 1, 1, 1])
-      self.assertAllEqual(v_tf.eval(), v_np)
+      self.assertAllEqual(v_tf, v_np)
 
   @test_util.run_deprecated_v1
   def testBroadcastToShapeTypeAndInference(self):
@@ -123,9 +125,17 @@ class BroadcastToTest(test_util.TensorFlowTestCase):
             constant_op.constant([3, 3], dtype=dtype))
         shape = v_tf.get_shape().as_list()
         v_np = np.broadcast_to(x, [3, 3])
-        self.assertAllEqual(v_tf.eval(), v_np)
+        self.assertAllEqual(v_tf, v_np)
         # check shape inference when shape input is constant
         self.assertAllEqual(shape, v_np.shape)
+
+  def testBroadcastToBadOutputShape(self):
+    with context.eager_mode():
+      with self.assertRaisesRegex(errors.InvalidArgumentError,
+                                  "Unable to broadcast tensor of shape"):
+        self.evaluate(
+            array_ops.broadcast_to(
+                constant_op.constant([0, 1]), constant_op.constant([2, 1])))
 
   @test_util.run_deprecated_v1
   def testGradientForScalar(self):

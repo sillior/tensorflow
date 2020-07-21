@@ -38,16 +38,21 @@ import datetime
 import os
 import threading
 
-from tensorflow.python import pywrap_tensorflow
+from tensorflow.python import _pywrap_events_writer
 from tensorflow.python.eager import context
-from tensorflow.python.framework import c_api_util
+from tensorflow.python.framework import errors
 from tensorflow.python.platform import gfile
 from tensorflow.python.platform import tf_logging as logging
-
+from tensorflow.python.profiler.internal import _pywrap_profiler
+from tensorflow.python.util import compat
+from tensorflow.python.util.deprecation import deprecated
 
 _profiler = None
 _profiler_lock = threading.Lock()
 _run_num = 0
+# This suffix should be kept in sync with kProfileEmptySuffix in
+# tensorflow/core/profiler/rpc/client/capture_profile.cc.
+_EVENT_FILE_SUFFIX = '.profile-empty'
 
 
 class ProfilerAlreadyRunningError(Exception):
@@ -58,6 +63,7 @@ class ProfilerNotRunningError(Exception):
   pass
 
 
+@deprecated('2020-07-01', 'use `tf.profiler.experimental.start` instead.')
 def start():
   """Start profiling.
 
@@ -68,19 +74,19 @@ def start():
   with _profiler_lock:
     if _profiler is not None:
       raise ProfilerAlreadyRunningError('Another profiler is running.')
-    profiler_context = pywrap_tensorflow.TFE_NewProfilerContext()
     if context.default_execution_mode == context.EAGER_MODE:
-      pywrap_tensorflow.TFE_ProfilerContextSetEagerContext(
-          profiler_context,
-          context.context()._handle)  # pylint: disable=protected-access
-    _profiler = pywrap_tensorflow.TFE_NewProfiler(profiler_context)
-    pywrap_tensorflow.TFE_DeleteProfilerContext(profiler_context)
-    if not pywrap_tensorflow.TFE_ProfilerIsOk(_profiler):
+      context.ensure_initialized()
+    _profiler = _pywrap_profiler.ProfilerSession()
+    try:
+      _profiler.start('', {})
+    except errors.AlreadyExistsError:
       logging.warning('Another profiler session is running which is probably '
                       'created by profiler server. Please avoid using profiler '
                       'server and profiler APIs at the same time.')
+      raise ProfilerAlreadyRunningError('Another profiler is running.')
 
 
+@deprecated('2020-07-01', 'use `tf.profiler.experimental.stop` instead.')
 def stop():
   """Stop current profiling session and return its result.
 
@@ -97,18 +103,40 @@ def stop():
     if _profiler is None:
       raise ProfilerNotRunningError(
           'Cannot stop profiling. No profiler is running.')
-    with c_api_util.tf_buffer() as buffer_:
-      pywrap_tensorflow.TFE_ProfilerSerializeToString(
-          context.context()._handle,  # pylint: disable=protected-access
-          _profiler,
-          buffer_)
-      result = pywrap_tensorflow.TF_GetBuffer(buffer_)
-    pywrap_tensorflow.TFE_DeleteProfiler(_profiler)
+    if context.default_execution_mode == context.EAGER_MODE:
+      context.context().executor.wait()
+    result = _profiler.stop()
     _profiler = None
     _run_num += 1
   return result
 
 
+@deprecated(
+    '2020-07-01',
+    '`tf.python.eager.profiler` has deprecated, use `tf.profiler` instead.'
+)
+def maybe_create_event_file(logdir):
+  """Create an empty event file if not already exists.
+
+  This event file indicates that we have a plugins/profile/ directory in the
+  current logdir.
+
+  Args:
+    logdir: log directory.
+  """
+  for file_name in gfile.ListDirectory(logdir):
+    if file_name.endswith(_EVENT_FILE_SUFFIX):
+      return
+  # TODO(b/127330388): Use summary_ops_v2.create_file_writer instead.
+  event_writer = _pywrap_events_writer.EventsWriter(
+      compat.as_bytes(os.path.join(logdir, 'events')))
+  event_writer.InitWithSuffix(compat.as_bytes(_EVENT_FILE_SUFFIX))
+
+
+@deprecated(
+    '2020-07-01',
+    '`tf.python.eager.profiler` has deprecated, use `tf.profiler` instead.'
+)
 def save(logdir, result):
   """Save profile result to TensorBoard logdir.
 
@@ -120,10 +148,12 @@ def save(logdir, result):
       logdir, 'plugins', 'profile',
       datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
   gfile.MakeDirs(plugin_dir)
+  maybe_create_event_file(logdir)
   with gfile.Open(os.path.join(plugin_dir, 'local.trace'), 'wb') as f:
     f.write(result)
 
 
+@deprecated('2020-07-01', 'use `tf.profiler.experimental.server.start`.')
 def start_profiler_server(port):
   """Start a profiler grpc server that listens to given port.
 
@@ -137,15 +167,12 @@ def start_profiler_server(port):
   Args:
     port: port profiler server listens to.
   """
-  profiler_context = pywrap_tensorflow.TFE_NewProfilerContext()
   if context.default_execution_mode == context.EAGER_MODE:
-    pywrap_tensorflow.TFE_ProfilerContextSetEagerContext(
-        profiler_context,
-        context.context()._handle)  # pylint: disable=protected-access
-  pywrap_tensorflow.TFE_StartProfilerServer(profiler_context, port)
-  pywrap_tensorflow.TFE_DeleteProfilerContext(profiler_context)
+    context.ensure_initialized()
+  _pywrap_profiler.start_server(port)
 
 
+@deprecated('2020-07-01', 'use `tf.profiler.experimental.Profile` instead.')
 class Profiler(object):
   """Context-manager eager profiler api.
 

@@ -22,6 +22,7 @@ import numpy as np
 
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gradient_checker
@@ -44,6 +45,18 @@ class ReshapeTest(test.TestCase):
       out = self.evaluate(tf_ans)
       self.assertEqual(tf_ans.get_shape(), out.shape)
       self.assertShapeEqual(np_ans, tf_ans)
+
+  def _testZeroDimReshape(self, x, shape, expected, use_gpu=False):
+    with self.cached_session(use_gpu=use_gpu):
+      y = array_ops.reshape(x, shape)
+      out = self.evaluate(y)
+      self.assertEqual(expected, out.shape)
+
+      # Repeat with an int64 shape tensor.
+      shape64 = constant_op.constant(shape, dtype=dtypes.int64)
+      y = array_ops.reshape(x, shape64)
+      out = self.evaluate(y)
+      self.assertEqual(expected, out.shape)
 
   def _testBothReshape(self, x, y):
     self._testReshape(x, y, False)
@@ -89,6 +102,18 @@ class ReshapeTest(test.TestCase):
     x = np.arange(1., 7.).reshape([6]).astype(np.float32)
     self._testBothReshape(x, [3, -1])
 
+  def testZeroDimBasic(self):
+    x = np.zeros([0, 6]).astype(np.float32)
+    self._testBothReshape(x, [0, 2, 3])
+
+  def testZeroDimReshapeR1(self):
+    x = np.zeros([0, 6]).astype(np.float32)
+    self._testBothReshape(x, [-1])
+
+  def testZeroDimReshapeR3(self):
+    x = np.zeros([0, 6]).astype(np.float32)
+    self._testBothReshape(x, [-1, 2, 3])
+
   # TODO(vrv): Add tests for failure conditions once python test_util
   # reports errors.
 
@@ -113,15 +138,22 @@ class ReshapeTest(test.TestCase):
     self._testBothReshape(x, [0, 0, 0])
     self._testBothReshape(x, [1, -1, 5])
 
+  def testZeroDimWithUnspecifiedDim(self):
+    for use_gpu in (True, False):
+      self._testZeroDimReshape(x=np.zeros([0, 6]).astype(np.float32),
+                               shape=[0, -1, 3],
+                               expected=(0, 2, 3),
+                               use_gpu=use_gpu)
+
   @test_util.run_deprecated_v1
   def testErrors(self):
     y = constant_op.constant(0.0, shape=[23, 29, 31])
-    with self.assertRaisesRegexp(ValueError, "must be evenly divisible by 17"):
+    with self.assertRaisesRegex(ValueError, "must be evenly divisible by 17"):
       array_ops.reshape(y, [17, -1])
 
     z = constant_op.constant(0.0, shape=[32, 128])
-    with self.assertRaisesRegexp(ValueError,
-                                 "Cannot reshape a tensor with 4096 elements"):
+    with self.assertRaisesRegex(ValueError,
+                                "Cannot reshape a tensor with 4096 elements"):
       array_ops.reshape(z, [4095])
 
   @test_util.run_deprecated_v1
@@ -159,6 +191,24 @@ class ReshapeTest(test.TestCase):
             array_ops.placeholder(
                 dtypes.float32, shape=[None, 37, None])))
     self.assertEqual([None, 37, None], y.get_shape().as_list())
+
+  def testTensorShape(self):
+    x = array_ops.zeros([1, 100])
+    y = array_ops.reshape(
+        x, [tensor_shape.Dimension(100),
+            tensor_shape.Dimension(1)])
+    self.assertEqual([100, 1], y.get_shape().as_list())
+    y = array_ops.reshape(x, tensor_shape.TensorShape([100, 1]))
+    self.assertEqual([100, 1], y.get_shape().as_list())
+
+  def testInt64Shape(self):
+    x = array_ops.zeros([50000, 50000], dtype=dtypes.bool)
+    # Provide dimension larger than int32
+    y = array_ops.reshape(x, [50000**2])
+    self.assertEqual([50000**2], y.get_shape().as_list())
+    # Even if first dimension is within int32, ensure we correctly go to int64
+    y = array_ops.reshape(x, [1, 50000**2])
+    self.assertEqual([1, 50000**2], y.get_shape().as_list())
 
 
 if __name__ == "__main__":

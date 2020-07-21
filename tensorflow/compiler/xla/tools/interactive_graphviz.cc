@@ -38,19 +38,26 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/local_service.h"
 #include "tensorflow/compiler/xla/service/platform_util.h"
 #include "tensorflow/compiler/xla/tools/hlo_extractor.h"
+#include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/subprocess.h"
+#include "tensorflow/core/protobuf/error_codes.pb.h"
 #include "tensorflow/core/util/command_line_flags.h"
 #if defined(PLATFORM_GOOGLE)
 #include "util/readline/readline.h"
+#endif
+
+#if defined(PLATFORM_WINDOWS)
+#include <io.h>
+#define isatty _isatty
 #endif
 
 namespace xla {
 namespace tools {
 namespace {
 
-bool ReadLine(const char *prompt, string *line) {
+bool ReadLine(const char* prompt, string* line) {
 #if defined(PLATFORM_GOOGLE)
   return util::ReadLine(prompt, line);
 #else
@@ -105,8 +112,7 @@ constexpr int64 kDefaultMaxNumNodesInAllPaths = 100;
 
 using absl::EqualsIgnoreCase;
 
-// A global control for whether backend configuration display is enabled.
-bool show_backend_config = true;
+HloRenderOptions hlo_render_options;
 
 HloInstruction* FindInstruction(const HloModule& module, string node_name) {
   if (absl::StartsWith(node_name, "%")) {
@@ -153,6 +159,8 @@ void DoHelpCommand() {
     Renders all nodes in <computation>.
   backend_config [on|off]
     Controls whether backend operation configuration information is printed.
+  show_fusion_subcomputations [on|off]
+    Controls whether fusion subcomputations are shown.
   list [name|op_name|op_type] <pattern>
     Lists all instructions whose name, metadata op_name, or metadata op_type
     contains <pattern> as a substring.
@@ -166,22 +174,41 @@ void DoHelpCommand() {
     <height> is specified, the new computation contains nodes up to <height>
     nodes above the root.
   help
-    Prints this usage information.)"
+    Prints this usage information.
+  quit
+    Exit the application.)"
             << std::endl;
 }
 
 // Turn metadata-printing on or off.
 void DoBackendConfigCommand(const std::vector<string>& tokens) {
   if (tokens.size() == 2 && tokens[1] == "on") {
-    show_backend_config = true;
+    hlo_render_options.show_backend_config = true;
   } else if (tokens.size() == 2 && tokens[1] == "off") {
-    show_backend_config = false;
+    hlo_render_options.show_backend_config = false;
   } else if (tokens.size() != 1) {
     std::cerr << "(Illegal backend_config value.  Use either 'on' or 'off'.)"
               << std::endl;
   }
   std::cout << "Backend configuration display "
-            << (show_backend_config ? "ON" : "OFF") << std::endl;
+            << (hlo_render_options.show_backend_config ? "ON" : "OFF")
+            << std::endl;
+}
+
+// Turn fusion computation display on or off.
+void DoShowFusionSubcomputationsCommand(const std::vector<string>& tokens) {
+  if (tokens.size() == 2 && tokens[1] == "on") {
+    hlo_render_options.show_fusion_subcomputations = true;
+  } else if (tokens.size() == 2 && tokens[1] == "off") {
+    hlo_render_options.show_fusion_subcomputations = false;
+  } else if (tokens.size() != 1) {
+    std::cerr << "(Illegal show_fusion_subcomputations value.  Use either "
+                 "'on' or 'off'.)"
+              << std::endl;
+  }
+  std::cout << "Fusion subcomputations display "
+            << (hlo_render_options.show_fusion_subcomputations ? "ON" : "OFF")
+            << std::endl;
 }
 
 // List all computations in the module.
@@ -364,7 +391,7 @@ void DoExtractCommand(const HloModule& module,
   auto extracted_module = ExtractModule(instr, height);
   std::cout << extracted_module->ToString(
                    HloPrintOptions::ShortParsable().set_print_backend_config(
-                       show_backend_config))
+                       hlo_render_options.show_backend_config))
             << std::endl;
 }
 
@@ -388,27 +415,82 @@ bool ExistsPathFromTo(const HloInstruction* from, const HloInstruction* to) {
   return false;
 }
 
-void DisplayGraphHandle(const Options &opts, const string& handle) {
-  std::cout << handle << std::endl;
+void OpenUrl(const Options& opts, absl::string_view url) {
+  std::cout << url << std::endl;
 
   // If it is a url, try to open it up in the user's browser too.
-  if (absl::StartsWithIgnoreCase(handle, "http://") ||
-      absl::StartsWithIgnoreCase(handle, "https://") ||
-      absl::StartsWithIgnoreCase(handle, "file://")) {
+  if (absl::StartsWithIgnoreCase(url, "http://") ||
+      absl::StartsWithIgnoreCase(url, "https://") ||
+      absl::StartsWithIgnoreCase(url, "file://")) {
     const char* browser_bin = opts.browser.empty() ? "/usr/bin/sensible-browser"
                                                    : opts.browser.c_str();
     tensorflow::SubProcess p;
-    p.SetProgram(browser_bin, {browser_bin, handle});
+    p.SetProgram(browser_bin, {browser_bin, string(url)});
     p.Start();
-  } else if (handle.empty()) {
-    std::cerr << "Unable to render graph, perhaps due to graphviz server "
-                 "timeout.  Run with --logtostderr to see."
-              << std::endl;
   } else {
     std::cerr << "\nExpected a URL, but got strange graph result (dumped "
                  "above).  If this isn't what you expected, maybe file a bug?"
               << std::endl;
   }
+}
+
+// Renders a graph by calling `renderer`, and then tries to open it.
+//
+// `renderer` is a callback so we can try various formats.  In particular, the
+// URL format doesn't work out of the box; it requires you to register a plugin.
+void RenderAndDisplayGraph(
+    const Options& opts,
+    const std::function<StatusOr<string>(RenderedGraphFormat)>& renderer) {
+  StatusOr<string> url_result = renderer(RenderedGraphFormat::kUrl);
+  if (url_result.ok()) {
+    string url = url_result.ValueOrDie();
+    OpenUrl(opts, url);
+    return;
+  }
+
+  // Ignore UNAVAILABLE errors; these are expected when there's no URL renderer
+  // plugin registered.
+  if (url_result.status().code() != tensorflow::error::UNAVAILABLE) {
+    std::cerr << "Unable to render graph as URL: " << url_result.status()
+              << std::endl;
+    std::cerr << "Trying as HTML..." << std::endl;
+  }
+
+  auto* env = tensorflow::Env::Default();
+  StatusOr<string> html_result = renderer(RenderedGraphFormat::kHtml);
+  if (!html_result.ok()) {
+    std::cerr << "Failed to render graph as HTML: " << html_result.status()
+              << std::endl;
+    return;
+  }
+
+  std::vector<string> temp_dirs;
+  env->GetLocalTempDirectories(&temp_dirs);
+  if (temp_dirs.empty()) {
+    std::cerr << "Can't render graph as HTML because we can't find a suitable "
+                 "temp directory.  Try setting $TMPDIR?"
+              << std::endl;
+    return;
+  }
+
+  // Try to create a unique file inside of temp_dirs.front().  Notably, this
+  // file's name must end with ".html", otherwise web browsers will treat it as
+  // plain text, so we can't use Env::CreateUniqueFileName().
+  string temp_file_path = tensorflow::io::JoinPath(
+      temp_dirs.front(),
+      absl::StrFormat("interactive_graphviz.%d.html", env->NowMicros()));
+  auto status = tensorflow::WriteStringToFile(
+      env, temp_file_path, std::move(html_result).ValueOrDie());
+  if (status.ok()) {
+    OpenUrl(opts, absl::StrCat("file://", temp_file_path));
+    return;
+  }
+
+  std::cerr << "Failed to write rendered HTML graph to " << temp_file_path
+            << ": " << status;
+
+  // We don't bother trying kDot, because kHTML should always work (or if it
+  // doesn't, we don't have any reason to believe kDot will work better).
 }
 
 void DoAllPathsCommand(const Options& opts, const HloModule& module,
@@ -451,8 +533,10 @@ void DoAllPathsCommand(const Options& opts, const HloModule& module,
     std::cerr << "No path from/to " << tokens[1] << " to/from " << tokens[2];
     return;
   }
-  DisplayGraphHandle(opts, hlo_graph_dumper::DumpAllPathsFromTo(
-      *from, *to, max_nodes, /*show_backend_config=*/show_backend_config));
+  RenderAndDisplayGraph(opts, [&](RenderedGraphFormat format) {
+    return RenderAllPathsFromTo(*from, *to, max_nodes, format,
+                                hlo_render_options);
+  });
 }
 
 // Plot a given instruction neighborhood or computation with graphviz.
@@ -513,14 +597,17 @@ void DoPlotCommand(const Options& opts, const HloModule& module,
   // Generate the graph and print the resulting string, which should be a
   // graphviz url.
   if (comp) {
-    DisplayGraphHandle(opts, hlo_graph_dumper::DumpGraph(
-        *comp, "", comp->parent()->config().debug_options(), nullptr,
-        /*show_backend_config=*/show_backend_config));
+    RenderAndDisplayGraph(opts, [&](RenderedGraphFormat format) {
+      return RenderGraph(*comp, /*label=*/"",
+                         comp->parent()->config().debug_options(), format,
+                         /*hlo_execution_profile=*/nullptr, hlo_render_options);
+    });
   } else {
-    DisplayGraphHandle(opts, hlo_graph_dumper::DumpNeighborhoodAround(
-                                 *instr, graph_width,
-                                 /*show_backend_config=*/show_backend_config,
-                                 /*boundary=*/boundary));
+    RenderAndDisplayGraph(opts, [&](RenderedGraphFormat format) {
+      return RenderNeighborhoodAround(*instr, graph_width, format,
+                                      hlo_render_options,
+                                      /*boundary=*/boundary);
+    });
   }
 }
 
@@ -546,6 +633,8 @@ void InteractiveDumpGraphs(const Options& opts, const HloModule& module) {
       DoHelpCommand();
     } else if (tokens[0] == "backend_config") {
       DoBackendConfigCommand(tokens);
+    } else if (tokens[0] == "show_fusion_subcomputations") {
+      DoShowFusionSubcomputationsCommand(tokens);
     } else if (tokens[0] == "list") {
       if (tokens.size() > 1 && tokens[1] == "computations") {
         DoListComputationsCommand(module, tokens);
@@ -564,28 +653,22 @@ void InteractiveDumpGraphs(const Options& opts, const HloModule& module) {
   }
 }
 
-void CheckFlags(const Options &opts) {
-  std::vector<string> nonempty_proto_flags;
+void CheckFlags(const Options& opts) {
+  int nonempty_flags_amount = 0;
   if (!opts.hlo_proto.empty()) {
-    nonempty_proto_flags.push_back("--hlo_proto");
+    ++nonempty_flags_amount;
   }
   if (!opts.hlo_snapshot.empty()) {
-    nonempty_proto_flags.push_back("--hlo_snapshot");
+    ++nonempty_flags_amount;
   }
   if (!opts.hlo_text.empty()) {
-    nonempty_proto_flags.push_back("--hlo_text");
+    ++nonempty_flags_amount;
   }
-  switch (nonempty_proto_flags.size()) {
-    case 1:
-      // We're good to go.
-      break;
-    case 0:
-      LOG(FATAL) << "Need one of the following options: "
-                 << absl::StrJoin(nonempty_proto_flags, ", ");
-    default:
-      LOG(FATAL) << "Can only specify one of "
-                 << absl::StrJoin(nonempty_proto_flags, ", ");
+  if (nonempty_flags_amount == 1) {
+    return;
   }
+  LOG(FATAL) << "Can only specify one and only one of '--hlo_proto', "
+                "'--hlo_snapshot', '--hlo_text' flags.";
 }
 
 void RealMain(const Options& opts) {
@@ -662,8 +745,7 @@ int main(int argc, char** argv) {
                        "Platform to compile for: CPU, CUDA, etc"),
       tensorflow::Flag("browser", &opts.browser,
                        "Path to web browser used to display produced graphs."),
-      tensorflow::Flag("help", &need_help,
-                       "Prints this help message"),
+      tensorflow::Flag("help", &need_help, "Prints this help message"),
   };
   xla::string usage = tensorflow::Flags::Usage(argv[0], flag_list);
   bool parse_ok = tensorflow::Flags::Parse(&argc, argv, flag_list);

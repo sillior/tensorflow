@@ -26,6 +26,7 @@ from tensorflow.python.feature_column import feature_column_lib as fc_lib
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
+from tensorflow.python.framework import test_util
 from tensorflow.python.ops import lookup_ops
 from tensorflow.python.ops import parsing_ops
 from tensorflow.python.ops import variables as variables_lib
@@ -58,6 +59,31 @@ class EmbeddingColumnTest(test.TestCase):
         'aaa': parsing_ops.VarLenFeature(dtypes.int64)
     }, embedding_column._parse_example_spec)
 
+  def test_denylisted_column(self):
+    # HashedCategoricalColumn is denylisted and so will raise an exception.
+    categorical_column = fc_lib.categorical_column_with_hash_bucket(
+        key='aaa', hash_bucket_size=3)
+    embedding_dimension = 2
+    with self.assertRaises(TypeError):
+      tpu_fc.embedding_column(categorical_column, dimension=embedding_dimension)
+
+  def test_custom_column(self):
+    # This column is not in any allowlist but should succeed because
+    # it inherits from V2 CategoricalColumn.
+    categorical_column = fc_lib.categorical_column_with_identity(
+        key='aaa', num_buckets=10)
+    embedding_dimension = 2
+    embedding_column = tpu_fc.embedding_column(
+        categorical_column, dimension=embedding_dimension)
+    self.assertIs(categorical_column, embedding_column.categorical_column)
+    self.assertEqual(embedding_dimension, embedding_column.dimension)
+    self.assertEqual('mean', embedding_column.combiner)
+    self.assertEqual('aaa_embedding', embedding_column.name)
+    self.assertEqual('aaa_embedding', embedding_column._var_scope_name)
+    self.assertEqual((embedding_dimension,), embedding_column._variable_shape)
+    self.assertEqual({'aaa': parsing_ops.VarLenFeature(dtypes.int64)},
+                     embedding_column._parse_example_spec)
+
   def test_all_constructor_args(self):
     categorical_column = fc_lib.categorical_column_with_identity(
         key='aaa', num_buckets=3)
@@ -77,6 +103,7 @@ class EmbeddingColumnTest(test.TestCase):
         'aaa': parsing_ops.VarLenFeature(dtypes.int64)
     }, embedding_column._parse_example_spec)
 
+  @test_util.deprecated_graph_mode_only
   def test_get_dense_tensor(self):
     # Inputs.
     vocabulary_size = 3
@@ -134,12 +161,13 @@ class EmbeddingColumnTest(test.TestCase):
     self.assertItemsEqual(('embedding_weights:0',),
                           tuple([v.name for v in global_vars]))
     with _initialized_session():
-      self.assertAllEqual(embedding_values, global_vars[0].eval())
-      self.assertAllEqual(expected_lookups, embedding_lookup.eval())
+      self.assertAllEqual(embedding_values, global_vars[0])
+      self.assertAllEqual(expected_lookups, embedding_lookup)
 
 
 class SharedEmbeddingColumnTest(test.TestCase):
 
+  @test_util.deprecated_graph_mode_only
   def test_defaults(self):
     categorical_column_a = fc_lib.categorical_column_with_identity(
         key='aaa', num_buckets=3)
@@ -176,6 +204,7 @@ class SharedEmbeddingColumnTest(test.TestCase):
         'bbb': parsing_ops.VarLenFeature(dtypes.int64)
     }, embedding_column_b._parse_example_spec)
 
+  @test_util.deprecated_graph_mode_only
   def test_all_constructor_args(self):
     categorical_column_a = fc_lib.categorical_column_with_identity(
         key='aaa', num_buckets=3)
@@ -213,6 +242,7 @@ class SharedEmbeddingColumnTest(test.TestCase):
         'bbb': parsing_ops.VarLenFeature(dtypes.int64)
     }, embedding_column_b._parse_example_spec)
 
+  @test_util.deprecated_graph_mode_only
   def test_get_dense_tensor(self):
     # Inputs.
     vocabulary_size = 3
@@ -277,9 +307,9 @@ class SharedEmbeddingColumnTest(test.TestCase):
                           tuple([v.name for v in global_vars]))
     embedding_var = global_vars[0]
     with _initialized_session():
-      self.assertAllEqual(embedding_values, embedding_var.eval())
-      self.assertAllEqual(expected_lookups_a, embedding_lookup_a.eval())
-      self.assertAllEqual(expected_lookups_b, embedding_lookup_b.eval())
+      self.assertAllEqual(embedding_values, embedding_var)
+      self.assertAllEqual(expected_lookups_a, embedding_lookup_a)
+      self.assertAllEqual(expected_lookups_b, embedding_lookup_b)
 
 
 if __name__ == '__main__':

@@ -45,8 +45,8 @@ const char XlaContext::kXlaContextResourceName[] = "_xla_context";
   // per-step context is looked up in the resource manager. The
   // JIT will prepopulate the JITContext.
   XlaContext* context;
-  TF_CHECK_OK(ctx->resource_manager()->Lookup(
-      ctx->step_container()->name(), kXlaContextResourceName, &context));
+  TF_CHECK_OK(ctx->step_container()->Lookup(ctx->resource_manager(),
+                                            kXlaContextResourceName, &context));
   // The resource manager handed us a fresh reference to 'context', but retains
   // a reference itself so the context won't be freed. The resource manager will
   // outlive the JIT compilation.
@@ -64,7 +64,8 @@ XlaContext::XlaContext(XlaCompiler* compiler, xla::XlaBuilder* builder)
 string XlaContext::DebugString() const { return "XLA JIT context"; }
 
 void XlaContext::SetRetval(int index, const XlaExpression& expression) {
-  if (retvals_.size() <= index) {
+  const int64 retvals_size = retvals_.size();
+  if (retvals_size <= index) {
     retvals_.resize(index + 1);
   }
   retvals_[index] = expression;

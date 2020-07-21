@@ -14,9 +14,16 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/lite/kernels/subgraph_test_util.h"
+
+#include <stdint.h>
+
+#include <memory>
+#include <vector>
+
 #include <gtest/gtest.h>
 #include "tensorflow/lite/interpreter.h"
-#include "tensorflow/lite/kernels/test_util.h"
+#include "tensorflow/lite/kernels/kernel_util.h"
+#include "tensorflow/lite/testing/util.h"
 
 namespace tflite {
 
@@ -35,7 +42,7 @@ class SubgraphBuilderTest : public ::testing::Test {
   }
 
  protected:
-  void TestAccumelateLoopBody(int input1, int input2, int output1,
+  void TestAccumulateLoopBody(int input1, int input2, int output1,
                               int output2) {
     interpreter_.reset(new Interpreter);
     builder_->BuildAccumulateLoopBodySubgraph(
@@ -106,6 +113,22 @@ TEST_F(SubgraphBuilderTest, TestBuildPadSubgraph) {
   CheckIntTensor(output, {5}, {0, 5, 7, 0, 0});
 }
 
+TEST_F(SubgraphBuilderTest, TestBuildDynamicPadSubgraph) {
+  builder_->BuildPadSubgraph(&interpreter_->primary_subgraph());
+
+  interpreter_->ResizeInputTensor(interpreter_->inputs()[0], {2});
+  interpreter_->ResizeInputTensor(interpreter_->inputs()[1], {1, 2});
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+
+  FillIntTensor(interpreter_->tensor(interpreter_->inputs()[0]), {5, 7});
+  FillIntTensor(interpreter_->tensor(interpreter_->inputs()[1]), {1, 2});
+  ASSERT_EQ(interpreter_->Invoke(), kTfLiteOk);
+
+  TfLiteTensor* output = interpreter_->tensor(interpreter_->outputs()[0]);
+  EXPECT_TRUE(IsDynamicTensor(output));
+  CheckIntTensor(output, {5}, {0, 5, 7, 0, 0});
+}
+
 TEST_F(SubgraphBuilderTest, TestBuildLessEqualCondSubgraph) {
   builder_->BuildLessEqualCondSubgraph(&interpreter_->primary_subgraph(), 3);
 
@@ -123,9 +146,9 @@ TEST_F(SubgraphBuilderTest, TestBuildLessEqualCondSubgraph) {
 }
 
 TEST_F(SubgraphBuilderTest, TestBuildAccumulateLoopBodySubgraph) {
-  TestAccumelateLoopBody(1, 1, 2, 3);
-  TestAccumelateLoopBody(2, 3, 3, 6);
-  TestAccumelateLoopBody(3, 6, 4, 10);
+  TestAccumulateLoopBody(1, 1, 2, 3);
+  TestAccumulateLoopBody(2, 3, 3, 6);
+  TestAccumulateLoopBody(3, 6, 4, 10);
 }
 
 TEST_F(SubgraphBuilderTest, TestBuildPadLoopBodySubgraph) {

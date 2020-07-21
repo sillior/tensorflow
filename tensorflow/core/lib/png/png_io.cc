@@ -105,8 +105,9 @@ void StringReader(png_structp png_ptr, png_bytep data, png_size_t length) {
   }
 }
 
+template <typename T>
 void StringWriter(png_structp png_ptr, png_bytep data, png_size_t length) {
-  string* const s = absl::bit_cast<string*>(png_get_io_ptr(png_ptr));
+  T* const s = absl::bit_cast<T*>(png_get_io_ptr(png_ptr));
   s->append(absl::bit_cast<const char*>(data), length);
 }
 
@@ -281,8 +282,11 @@ bool CommonInitDecode(StringPiece png_string, int desired_channels,
   }
 
   // convert palette to rgb(a) if needs be.
-  if (context->color_type == PNG_COLOR_TYPE_PALETTE)
+  // Note if desired_channels=1 then the original palette indices
+  // will be presented.
+  if (context->color_type == PNG_COLOR_TYPE_PALETTE && desired_channels != 1) {
     png_set_palette_to_rgb(context->png_ptr);
+  }
 
   // handle grayscale case for source or destination
   const bool want_gray = (context->channels < 3);
@@ -293,7 +297,9 @@ bool CommonInitDecode(StringPiece png_string, int desired_channels,
     }
   }
   if (want_gray) {  // output is grayscale
-    if (!is_gray)
+    // Note if color type is palette and context->channels < 3,
+    // then the original palette indices will be presented.
+    if (!is_gray && context->color_type != PNG_COLOR_TYPE_PALETTE)
       png_set_rgb_to_gray(context->png_ptr, 1, 0.299, 0.587);  // 601, JPG
   } else {  // output is rgb(a)
     if (is_gray)
@@ -340,9 +346,10 @@ bool CommonFinishDecode(png_bytep data, int row_bytes, DecodeContext* context) {
   return ok;
 }
 
+template <typename T>
 bool WriteImageToBuffer(
     const void* image, int width, int height, int row_bytes, int num_channels,
-    int channel_bits, int compression, string* png_string,
+    int channel_bits, int compression, T* png_string,
     const std::vector<std::pair<string, string> >* metadata) {
   CHECK_NOTNULL(image);
   CHECK_NOTNULL(png_string);
@@ -384,7 +391,7 @@ bool WriteImageToBuffer(
       return false;
   }
 
-  png_set_write_fn(png_ptr, png_string, StringWriter, StringWriterFlush);
+  png_set_write_fn(png_ptr, png_string, StringWriter<T>, StringWriterFlush);
   if (compression < 0) compression = Z_DEFAULT_COMPRESSION;
   png_set_compression_level(png_ptr, compression);
   png_set_compression_mem_level(png_ptr, MAX_MEM_LEVEL);
@@ -417,6 +424,15 @@ bool WriteImageToBuffer(
   png_destroy_write_struct(&png_ptr, &info_ptr);
   return true;
 }
+
+template bool WriteImageToBuffer<string>(
+    const void* image, int width, int height, int row_bytes, int num_channels,
+    int channel_bits, int compression, string* png_string,
+    const std::vector<std::pair<string, string> >* metadata);
+template bool WriteImageToBuffer<tstring>(
+    const void* image, int width, int height, int row_bytes, int num_channels,
+    int channel_bits, int compression, tstring* png_string,
+    const std::vector<std::pair<string, string> >* metadata);
 
 }  // namespace png
 }  // namespace tensorflow

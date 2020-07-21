@@ -23,6 +23,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/gpu/gpu_fusible.h"
 #include "tensorflow/compiler/xla/service/gpu/instruction_fusion.h"
 #include "tensorflow/compiler/xla/service/hlo_cost_analysis.h"
+#include "tensorflow/compiler/xla/service/llvm_ir/fused_ir_emitter.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -149,6 +150,8 @@ class FusionInstructionMerger {
   int num_fail_merge_all_users_ = 0;
   int num_fail_expensive_fused_instruction_ = 0;
   int num_fail_net_bytes_transferred_ratio_ = 0;
+  int num_fail_inefficient_fusion_emitter_ = 0;
+  int num_fail_fusion_too_large_ = 0;
 
   TF_DISALLOW_COPY_AND_ASSIGN(FusionInstructionMerger);
 };
@@ -169,7 +172,9 @@ Status FusionInstructionMerger::Run() {
           << " merge_all_users: " << num_fail_merge_all_users_
           << " expensive_instruction: " << num_fail_expensive_fused_instruction_
           << " net_bytes_transferred: " << num_fail_net_bytes_transferred_ratio_
-          << " }";
+          << " inefficient_fusion_emitter: "
+          << num_fail_inefficient_fusion_emitter_
+          << " fusion_too_large: " << num_fail_fusion_too_large_ << " }";
   return Status::OK();
 }
 
@@ -186,26 +191,18 @@ Status FusionInstructionMerger::HandleFusion(HloInstruction* fusion) {
   // instructions match specific patterns, so they shouldn't be further fused.
   // Input fusion instructions need to be rooted at a particular HLO (e.g.
   // kReduce), so they shouldn't be further fused either.
-  if (fusion->fusion_kind() != HloInstruction::FusionKind::kLoop) {
+  if (!fusion->IsLoopFusion()) {
     VLOG(3) << "Not merging " << fusion->name() << ": Is not loop fusion.";
     ++num_fail_not_loop_fusion_;
     return Status::OK();
   }
 
-  // Skip multiple output fusion. It's not yet supported.
-  if (fusion->IsMultiOutputFusion()) {
-    VLOG(3) << "Not merging " << fusion->name() << ": Is multi-output fusion.";
-    ++num_fail_not_loop_fusion_;
-    return Status::OK();
-  }
   // Skip 'fusion' instruction if we cannot merge into all of its users.
   // Merging into all users enables the removal of 'fusion' from the
   // computation.
   if (!absl::c_all_of(fusion->users(), [&](const HloInstruction* user) {
         return user->opcode() == HloOpcode::kFusion &&
-               (user->fusion_kind() == HloInstruction::FusionKind::kLoop ||
-                (IsReduceInputFusion(*user) &&
-                 LayoutsAreReduceInputFusionFriendly(*fusion, *user)));
+               IsProducerConsumerFusible(*fusion, *user);
       })) {
     VLOG(3) << "Not merging " << fusion->name()
             << ": Some of its users are not loop/input fusion kernels.";
@@ -213,27 +210,9 @@ Status FusionInstructionMerger::HandleFusion(HloInstruction* fusion) {
     return Status::OK();
   }
 
-  // Skip 'fusion' instruction if any of its fused instructions are expensive.
-  // This is done to avoid the duplication of expensive instructions, which
-  // would occur if 'fusion' were merged into multiple users.
-  //
-  // If 'fusion' has just one user, then an earlier fusion pass chose not to
-  // fuse this producer/comsumer pair (likely because of expensive instruction
-  // re-use by the consumer), and so we honor that choice here as well.
-  if (absl::c_any_of(fusion->fused_instructions(),
-                     [](const HloInstruction* instruction) {
-                       return instruction->opcode() != HloOpcode::kParameter &&
-                              GpuInstructionFusion::IsExpensive(*instruction);
-                     })) {
-    VLOG(3) << "Not merging " << fusion->name()
-            << ": Contains one or more expensive instructions.";
-    ++num_fail_expensive_fused_instruction_;
-    return Status::OK();
-  }
-
   // Skip 'fusion' instruction if merging it into all users would result in a
   // net increase in bytes transferred (currently allowing the net bytes
-  // transferred to be exceeded up to ~10% in exhange for eliminating the
+  // transferred to be exceeded up to ~10% in exchange for eliminating the
   // overhead from a GPU kernel launch).
   const double current_bytes_transferred = GetCurrentBytesTransferred(fusion);
   const double merged_bytes_transferred = GetMergedBytesTransferred(fusion);
@@ -246,6 +225,64 @@ Status FusionInstructionMerger::HandleFusion(HloInstruction* fusion) {
     ++num_fail_net_bytes_transferred_ratio_;
     return Status::OK();
   }
+
+  // Skip 'fusion' instruction if any of its fused instructions are expensive.
+  // This is done to avoid the duplication of expensive instructions, which
+  // would occur if 'fusion' were merged into multiple users.
+  //
+  // If 'fusion' has just one user, then an earlier fusion pass chose not to
+  // fuse this producer/consumer pair (likely because of expensive instruction
+  // re-use by the consumer), and so we honor that choice here as well.
+  //
+  // Moreover, if we are going to save a "lot" in memory bandwidth then we
+  // ignore how expensive the fusion instructions are.  The heuristic used to
+  // determine "a lot" is the following: merging must reduce memory traffic by a
+  // factor of 0.3, and the amount of memory accessed must not be entirely
+  // trivial (above 1K).  This likely has room for improvement in the future.
+
+  bool allow_expensive_ops =
+      merged_to_current_bytes_ratio < 0.3 && current_bytes_transferred > 1024;
+
+  if (!allow_expensive_ops &&
+      absl::c_any_of(fusion->fused_instructions(),
+                     [](const HloInstruction* instruction) {
+                       return instruction->opcode() != HloOpcode::kParameter &&
+                              GpuInstructionFusion::IsExpensive(*instruction);
+                     })) {
+    VLOG(3) << "Not merging " << fusion->name()
+            << ": Contains one or more expensive instructions.";
+    ++num_fail_expensive_fused_instruction_;
+    return Status::OK();
+  }
+
+  // Skip 'fusion' instruction if merging it into at least one of the users
+  // would cause too much code duplication because of inefficiencies in the
+  // fusion emitter.
+  // TODO(b/119692968): Remove this once the fusion emitter can handle arbitrary
+  // fusion nodes.
+  if (absl::c_any_of(fusion->users(), [fusion](const HloInstruction* user) {
+        return FusedIrEmitter::IsFusedIrEmitterInefficient(/*consumer=*/user,
+                                                           /*producer=*/fusion);
+      })) {
+    VLOG(3) << "Not merging " << fusion->name()
+            << ": Contains one or more users where fusing would cause "
+               "inefficiencies in the fusion emitter.";
+    ++num_fail_inefficient_fusion_emitter_;
+    return Status::OK();
+  }
+
+  // Skip 'fusion' instruction if merging it into at least one of the users
+  // would make the fusion too big.
+  if (absl::c_any_of(fusion->users(), [fusion](const HloInstruction* user) {
+        return FusionWouldBeTooLarge(*fusion, *user);
+      })) {
+    VLOG(3) << "Not merging " << fusion->name()
+            << ": Contains one or more users where fusing would cause "
+               "the fusion to have too many parameters.";
+    ++num_fail_fusion_too_large_;
+    return Status::OK();
+  }
+
   // Merge fused instructions from 'fusion' into each user.
   std::vector<HloInstruction*> users = fusion->users();
   for (HloInstruction* user : users) {
