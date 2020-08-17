@@ -25,6 +25,7 @@ import math
 import os
 import time
 
+from absl.testing import parameterized
 import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
@@ -48,6 +49,7 @@ from tensorflow.python.ops import image_ops_impl
 from tensorflow.python.ops import io_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import random_ops
+from tensorflow.python.ops import stateless_random_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import googletest
 from tensorflow.python.platform import test
@@ -1001,7 +1003,8 @@ class AdjustSaturationTest(test_util.TensorFlowTestCase):
           self.assertAllClose(y_fused, y_baseline, rtol=2e-5, atol=1e-5)
 
 
-class FlipTransposeRotateTest(test_util.TensorFlowTestCase):
+class FlipTransposeRotateTest(test_util.TensorFlowTestCase,
+                              parameterized.TestCase):
 
   def testInvolutionLeftRight(self):
     x_np = np.array([[1, 2, 3], [1, 2, 3]], dtype=np.uint8).reshape([2, 3, 1])
@@ -1075,6 +1078,109 @@ class FlipTransposeRotateTest(test_util.TensorFlowTestCase):
       # Six Sigma: 50 - (5 * 6) = 20
       self.assertGreaterEqual(count_flipped, 20)
       self.assertGreaterEqual(count_unflipped, 20)
+
+  # TODO(b/162345082): stateless random op generates different random number
+  # with xla_gpu. Update tests such that there is a single ground truth result
+  # to test against.
+  @parameterized.named_parameters(
+      ("_RandomFlipLeftRight", image_ops.stateless_random_flip_left_right),
+      ("_RandomFlipUpDown", image_ops.stateless_random_flip_up_down),
+  )
+  def testRandomFlipStateless(self, func):
+    with test_util.use_gpu():
+      x_np = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint8).reshape([2, 3, 1])
+      y_np = np.array([[3, 2, 1], [6, 5, 4]], dtype=np.uint8).reshape([2, 3, 1])
+      if "RandomFlipUpDown" in self.id():
+        y_np = np.array(
+            [[4, 5, 6], [1, 2, 3]], dtype=np.uint8).reshape([2, 3, 1])
+
+      x_tf = constant_op.constant(x_np, shape=x_np.shape)
+
+      iterations = 2
+      flip_counts = [None for _ in range(iterations)]
+      flip_sequences = ["" for _ in range(iterations)]
+      test_seed = (1, 2)
+      split_seeds = stateless_random_ops.split(test_seed, 10)
+      seeds_list = self.evaluate(split_seeds)
+      for i in range(iterations):
+        count_flipped = 0
+        count_unflipped = 0
+        flip_seq = ""
+        for seed in seeds_list:
+          y_tf = func(x_tf, seed=seed)
+          y_tf_eval = self.evaluate(y_tf)
+          if y_tf_eval[0][0] == 1:
+            self.assertAllEqual(y_tf_eval, x_np)
+            count_unflipped += 1
+            flip_seq += "U"
+          else:
+            self.assertAllEqual(y_tf_eval, y_np)
+            count_flipped += 1
+            flip_seq += "F"
+
+        flip_counts[i] = (count_flipped, count_unflipped)
+        flip_sequences[i] = flip_seq
+
+      # Verify that results are deterministic.
+      for i in range(1, iterations):
+        self.assertAllEqual(flip_counts[0], flip_counts[i])
+        self.assertAllEqual(flip_sequences[0], flip_sequences[i])
+
+  # TODO(b/162345082): stateless random op generates different random number
+  # with xla_gpu. Update tests such that there is a single ground truth result
+  # to test against.
+  @parameterized.named_parameters(
+      ("_RandomFlipLeftRight", image_ops.stateless_random_flip_left_right),
+      ("_RandomFlipUpDown", image_ops.stateless_random_flip_up_down)
+  )
+  def testRandomFlipStatelessWithBatch(self, func):
+    with test_util.use_gpu():
+      batch_size = 16
+
+      # create single item of test data
+      x_np_raw = np.array(
+          [[1, 2, 3], [4, 5, 6]], dtype=np.uint8).reshape([1, 2, 3, 1])
+      y_np_raw = np.array(
+          [[3, 2, 1], [6, 5, 4]], dtype=np.uint8).reshape([1, 2, 3, 1])
+      if "RandomFlipUpDown" in self.id():
+        y_np_raw = np.array(
+            [[4, 5, 6], [1, 2, 3]], dtype=np.uint8).reshape([1, 2, 3, 1])
+
+      # create batched test data
+      x_np = np.vstack([x_np_raw for _ in range(batch_size)])
+      y_np = np.vstack([y_np_raw for _ in range(batch_size)])
+
+      x_tf = constant_op.constant(x_np, shape=x_np.shape)
+
+      iterations = 2
+      flip_counts = [None for _ in range(iterations)]
+      flip_sequences = ["" for _ in range(iterations)]
+      test_seed = (1, 2)
+      split_seeds = stateless_random_ops.split(test_seed, 10)
+      seeds_list = self.evaluate(split_seeds)
+      for i in range(iterations):
+        count_flipped = 0
+        count_unflipped = 0
+        flip_seq = ""
+        for seed in seeds_list:
+          y_tf = func(x_tf, seed=seed)
+          y_tf_eval = self.evaluate(y_tf)
+          for j in range(batch_size):
+            if y_tf_eval[j][0][0] == 1:
+              self.assertAllEqual(y_tf_eval[j], x_np[j])
+              count_unflipped += 1
+              flip_seq += "U"
+            else:
+              self.assertAllEqual(y_tf_eval[j], y_np[j])
+              count_flipped += 1
+              flip_seq += "F"
+
+        flip_counts[i] = (count_flipped, count_unflipped)
+        flip_sequences[i] = flip_seq
+
+      for i in range(1, iterations):
+        self.assertAllEqual(flip_counts[0], flip_counts[i])
+        self.assertAllEqual(flip_sequences[0], flip_sequences[i])
 
   @test_util.run_deprecated_v1
   def testRandomFlipLeftRightWithBatch(self):
@@ -2311,6 +2417,149 @@ class SelectDistortedCropBoxTest(test_util.TensorFlowTestCase):
       begin = self.evaluate(begin)
       end = self.evaluate(end)
       bbox_for_drawing = self.evaluate(bbox_for_drawing)
+
+  def _testStatelessSampleDistortedBoundingBox(self, image, bounding_box,
+                                               min_object_covered,
+                                               aspect_ratio_range, area_range):
+    with test_util.use_gpu():
+      original_area = float(np.prod(image.shape))
+      bounding_box_area = float((bounding_box[3] - bounding_box[1]) *
+                                (bounding_box[2] - bounding_box[0]))
+
+      image_size_np = np.array(image.shape, dtype=np.int32)
+      bounding_box_np = (
+          np.array(bounding_box, dtype=np.float32).reshape([1, 1, 4]))
+
+      iterations = 2
+      test_seeds = [(1, 2), (3, 4), (5, 6)]
+
+      for seed in test_seeds:
+        aspect_ratios = []
+        area_ratios = []
+        fraction_object_covered = []
+        for _ in range(iterations):
+          image_tf = constant_op.constant(image, shape=image.shape)
+          image_size_tf = constant_op.constant(
+              image_size_np, shape=image_size_np.shape)
+          bounding_box_tf = constant_op.constant(bounding_box_np,
+                                                 dtype=dtypes.float32,
+                                                 shape=bounding_box_np.shape)
+          begin, size, _ = image_ops.stateless_sample_distorted_bounding_box(
+              image_size=image_size_tf,
+              bounding_boxes=bounding_box_tf,
+              seed=seed,
+              min_object_covered=min_object_covered,
+              aspect_ratio_range=aspect_ratio_range,
+              area_range=area_range)
+          y = array_ops.strided_slice(image_tf, begin, begin + size)
+          y_tf = self.evaluate(y)
+          crop_height = y_tf.shape[0]
+          crop_width = y_tf.shape[1]
+          aspect_ratio = float(crop_width) / float(crop_height)
+          area = float(crop_width * crop_height)
+          aspect_ratios.append(aspect_ratio)
+          area_ratio = area / original_area
+          area_ratios.append(area_ratio)
+          fraction_object_covered.append(
+              float(np.sum(y_tf)) / bounding_box_area)
+
+        # Check that `area_ratio` is within valid range.
+        self.assertLessEqual(area_ratio, area_range[1])
+        self.assertGreaterEqual(area_ratio, area_range[0])
+
+        # Each array should consist of one value just repeated `iteration` times
+        # because the same seed is used.
+        self.assertEqual(len(set(aspect_ratios)), 1)
+        self.assertEqual(len(set(area_ratios)), 1)
+        self.assertEqual(len(set(fraction_object_covered)), 1)
+
+  # TODO(b/162345082): stateless random op generates different random number
+  # with xla_gpu. Update tests such that there is a single ground truth result
+  # to test against.
+  def testWholeImageBoundingBoxStateless(self):
+    height = 40
+    width = 50
+    image_size = [height, width, 1]
+    bounding_box = [0.0, 0.0, 1.0, 1.0]
+    image = np.arange(
+        0, np.prod(image_size), dtype=np.int32).reshape(image_size)
+    for min_obj_covered in [0.1, constant_op.constant(0.1)]:
+      self._testStatelessSampleDistortedBoundingBox(
+          image,
+          bounding_box,
+          min_object_covered=min_obj_covered,
+          aspect_ratio_range=(0.75, 1.33),
+          area_range=(0.05, 1.0))
+
+  # TODO(b/162345082): stateless random op generates different random number
+  # with xla_gpu. Update tests such that there is a single ground truth result
+  # to test against.
+  def testWithBoundingBoxStateless(self):
+    height = 40
+    width = 50
+    x_shape = [height, width, 1]
+    image = np.zeros(x_shape, dtype=np.int32)
+
+    xmin = 2
+    ymin = 3
+    xmax = 12
+    ymax = 13
+    for x in np.arange(xmin, xmax + 1, 1):
+      for y in np.arange(ymin, ymax + 1, 1):
+        image[x, y] = 1
+
+    # Bounding box is specified as (ymin, xmin, ymax, xmax) in
+    # relative coordinates.
+    bounding_box = (float(ymin) / height, float(xmin) / width,
+                    float(ymax) / height, float(xmax) / width)
+
+    # Test both scalar and tensor input for `min_object_covered`.
+    for min_obj_covered in [0.1, constant_op.constant(0.1)]:
+      self._testStatelessSampleDistortedBoundingBox(
+          image,
+          bounding_box=bounding_box,
+          min_object_covered=min_obj_covered,
+          aspect_ratio_range=(0.75, 1.33),
+          area_range=(0.05, 1.0))
+
+  def testSampleDistortedBoundingBoxShapeStateless(self):
+    with test_util.use_gpu():
+      image_size = constant_op.constant(
+          [40, 50, 1], shape=[3], dtype=dtypes.int32)
+      bounding_box = constant_op.constant(
+          [[[0.0, 0.0, 1.0, 1.0]]],
+          shape=[1, 1, 4],
+          dtype=dtypes.float32,
+      )
+
+      bbox_func = functools.partial(
+          image_ops.stateless_sample_distorted_bounding_box,
+          image_size=image_size,
+          bounding_boxes=bounding_box,
+          min_object_covered=0.1,
+          aspect_ratio_range=(0.75, 1.33),
+          area_range=(0.05, 1.0))
+
+      # Check error is raised with wrong seed shapes.
+      for seed in [1, (1, 2, 3)]:
+        with self.assertRaises((ValueError, errors.InvalidArgumentError)):
+          begin, end, bbox_for_drawing = bbox_func(seed=seed)
+
+      test_seed = (1, 2)
+      begin, end, bbox_for_drawing = bbox_func(seed=test_seed)
+
+      # Test that the shapes are correct.
+      self.assertAllEqual([3], begin.get_shape().as_list())
+      self.assertAllEqual([3], end.get_shape().as_list())
+      self.assertAllEqual([1, 1, 4], bbox_for_drawing.get_shape().as_list())
+
+      # Actual run to make sure shape is correct inside Compute().
+      begin = self.evaluate(begin)
+      end = self.evaluate(end)
+      bbox_for_drawing = self.evaluate(bbox_for_drawing)
+      self.assertAllEqual([3], begin.shape)
+      self.assertAllEqual([3], end.shape)
+      self.assertAllEqual([1, 1, 4], bbox_for_drawing.shape)
 
 
 class ResizeImagesV2Test(test_util.TensorFlowTestCase):
@@ -4018,6 +4267,36 @@ class JpegTest(test_util.TensorFlowTestCase):
           are_images_equal.append(
               np.array_equal(random_jpeg_images[0], random_jpeg_images[i]))
         self.assertFalse(all(are_images_equal))
+
+  # TODO(b/162345082): stateless random op generates different random number
+  # with xla_gpu. Update tests such that there is a single ground truth result
+  # to test against.
+  def testStatelessRandomJpegQuality(self):
+    # Test deterministic randomness in jpeg quality by checking that the same
+    # sequence of jpeg quality adjustments are returned each round given the
+    # same seed.
+    with test_util.use_gpu():
+      path = ("tensorflow/core/lib/jpeg/testdata/medium.jpg")
+      jpeg = io_ops.read_file(path)
+      image = image_ops.decode_jpeg(jpeg)
+      jpeg_quality = (40, 100)
+      seeds_list = [(1, 2), (3, 4)]
+
+      iterations = 2
+      random_jpeg_images_all = [[] for _ in range(iterations)]
+      for random_jpeg_images in random_jpeg_images_all:
+        for seed in seeds_list:
+          distorted_jpeg = image_ops.stateless_random_jpeg_quality(
+              image, jpeg_quality[0], jpeg_quality[1], seed=seed)
+          # Verify that the random jpeg image is different from the original
+          # jpeg image.
+          self.assertNotAllEqual(image, distorted_jpeg)
+          random_jpeg_images.append(self.evaluate(distorted_jpeg))
+
+      # Verify that the results are identical given the same seed.
+      for i in range(1, iterations):
+        self.assertAllEqual(random_jpeg_images_all[0],
+                            random_jpeg_images_all[i])
 
   def testAdjustJpegQuality(self):
     # Test if image_ops.adjust_jpeg_quality works when jpeq quality

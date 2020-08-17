@@ -25,8 +25,8 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/micro/micro_allocator.h"
 #include "tensorflow/lite/micro/micro_op_resolver.h"
+#include "tensorflow/lite/portable_type_to_tflitetype.h"
 #include "tensorflow/lite/schema/schema_generated.h"
-#include "tensorflow/lite/type_to_tflitetype.h"
 
 namespace tflite {
 
@@ -42,8 +42,7 @@ class ContextHelper {
                          MicroAllocator* allocator, const Model* model);
 
   // Functions that will be assigned to function pointers on TfLiteContext:
-  static TfLiteStatus AllocatePersistentBuffer(TfLiteContext* ctx, size_t bytes,
-                                               void** ptr);
+  static void* AllocatePersistentBuffer(TfLiteContext* ctx, size_t bytes);
   static TfLiteStatus RequestScratchBufferInArena(TfLiteContext* ctx,
                                                   size_t bytes,
                                                   int* buffer_idx);

@@ -62,6 +62,7 @@ from tensorflow.python.framework import versions
 from tensorflow.python.ops import control_flow_util
 from tensorflow.python.platform import app
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.profiler import trace
 from tensorflow.python.types import core as core_tf_types
 from tensorflow.python.types import internal
 from tensorflow.python.util import compat
@@ -853,6 +854,7 @@ class Tensor(internal.NativeObject, core_tf_types.Tensor):
                     "Please call `x.shape` rather than `len(x)` for "
                     "shape information.".format(self.name))
 
+  # TODO(mdan): This convoluted machinery is hard to maintain. Clean up.
   @staticmethod
   def _override_operator(operator, func):
     _override_helper(Tensor, operator, func)
@@ -1471,6 +1473,7 @@ def pack_eager_tensors(tensors, ctx=None):
   return packed_tensor
 
 
+@trace.trace_wrapper("convert_to_tensor")
 def convert_to_tensor(value,
                       dtype=None,
                       name=None,
@@ -5819,7 +5822,24 @@ def executing_eagerly_outside_functions():
       return context.executing_eagerly()
 
 
+@tf_export("inside_function", v1=[])
 def inside_function():
+  """Indicates whether the caller code is executing inside a `tf.function`.
+
+  Returns:
+    Boolean, True if the caller code is executing inside a `tf.function`
+    rather than eagerly.
+
+  Example:
+
+  >>> tf.inside_function()
+  False
+  >>> @tf.function
+  ... def f():
+  ...   print(tf.inside_function())
+  >>> f()
+  True
+  """
   return get_default_graph().building_function
 
 

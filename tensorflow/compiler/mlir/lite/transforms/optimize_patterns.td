@@ -341,8 +341,8 @@ foreach BinaryOp = [TFL_AddOp, TFL_SubOp, TFL_DivOp, TFL_MulOp] in {
   // make sure $rhs is the tail shape of $lhs.
   def MoveBinaryOpBeforeReshape#BinaryOp : Pat<
     (BinaryOp (TFL_ReshapeOp:$lhs $input, (ConstantOp:$shape $s)),
-      (ConstantOp:$rhs $a), TFL_AF_None),
-    (TFL_ReshapeOp (BinaryOp $input, $rhs, TFL_AF_None), $shape),
+      (ConstantOp:$rhs $a), $act_fn),
+    (TFL_ReshapeOp (BinaryOp $input, $rhs, $act_fn), $shape),
     // The broadcasting of "BinaryOp" only happens in the lower
     // dimensions, and the higher dimensions are same, so we know the
     // result and input of the "BinaryOp" in the source pattern have
@@ -404,11 +404,14 @@ foreach ValueOp = [TFL_CeilOp, TFL_ExpOp, TFL_FloorOp, TFL_NegOp,
 // if called without a ranked tensor it will fail.
 def GetShape: NativeCodeCall<"GetShape($0)">;
 
-// Convert squeeze to reshape if possible.
+// Returns True if the operand type is RankedTensorType.
+def HasRankedTensor : Constraint<
+    CPred<"$0.getType().isa<RankedTensorType>()">>;
+
 def ConvertSqueezeToReshape : Pat<
   (TFL_SqueezeOp:$squeeze_op $input, $squeeze_dims),
   (TFL_ReshapeOp $input, (ConstantOp (GetShape $squeeze_op))),
-  [(AnyStaticShapeTensor $squeeze_op)]>;
+  [(HasRankedTensor $squeeze_op)]>;
 
 // Convert expand_dims to reshape if possible.
 def ConvertExpandDimsToReshape : Pat<
@@ -422,6 +425,11 @@ class FloatValueEquals<string val> : Constraint<CPred<
   "*$0.cast<DenseElementsAttr>().getValues<float>().begin() == " # val>>;
 
 // ReLU patterns
+def MatchReluPattern : Pat<
+  (TFL_MaximumOp $input, (ConstantOp $Zero)),
+  (TFL_ReluOp $input),
+  [(FloatValueEquals<"0"> $Zero)]>;
+
 def MatchRelu1Pattern1 : Pat<
   (TFL_MinimumOp (TFL_MaximumOp $input, (ConstantOp $NegOne)),
     (ConstantOp $One)),
@@ -500,3 +508,31 @@ foreach ActFun = [TFL_AF_Relu, TFL_AF_Relu6, TFL_AF_Relu1, TFL_AF_None] in {
 def OptimizeReluSquaredDifference : Pat<
   (TFL_ReluOp (TFL_SquaredDifferenceOp $l, $r)),
   (TFL_SquaredDifferenceOp $l, $r)>;
+
+// Optimize X^1 o X
+def OptimizePow1ToIdentity : Pat<
+  (TFL_PowOp $input,
+    (ConstantOp ConstantAttr<RankedF32ElementsAttr<[]>, "1.0f">)),
+  (replaceWithValue $input)>;
+
+// Optimize X^2 to X*X
+def OptimizePow2ToSquare : Pat<
+  (TFL_PowOp $input,
+    (ConstantOp ConstantAttr<RankedF32ElementsAttr<[]>, "2.0f">)),
+  (TFL_MulOp $input, $input, TFL_AF_None)>;
+
+def CanOptimizeIdentityGatherNdOrScatterNdOp : Constraint<CPred<
+  "TFL::CanOptimizeIdentityGatherNdOrScatterNdOp("
+  "$0, $1.cast<DenseIntElementsAttr>())">>;
+
+def OptimizeIdentityGatherNdOp : Pat<
+  (TFL_GatherNdOp $params, (ConstantOp I32ElementsAttr: $indices)),
+  (replaceWithValue $params),
+  [(CanOptimizeIdentityGatherNdOrScatterNdOp $params, $indices)]>;
+
+def OptimizeIdentityScatterNdOp : Pat<
+  (TFL_ScatterNdOp (ConstantOp I32ElementsAttr: $indices), $params, $ignored),
+  (replaceWithValue $params),
+  [(CanOptimizeIdentityGatherNdOrScatterNdOp $params, $indices)]>;
+
+

@@ -64,6 +64,8 @@ tensorflow::Status SetTpuProgramStructFn(void* library_handle) {
   TFTPU_SET_FN(tpu_program_fn, TpuProgram_GetHostTransferInfo);
   TFTPU_SET_FN(tpu_program_fn, TpuProgram_GetHloMetadata);
   TFTPU_SET_FN(tpu_program_fn, TpuProgram_GetMayModifyVariables);
+  TFTPU_SET_FN(tpu_program_fn, TpuProgram_HasSharding);
+  TFTPU_SET_FN(tpu_program_fn, TpuProgram_GetTpuProgram);
 
   return tensorflow::Status::OK();
 }
@@ -81,6 +83,7 @@ tensorflow::Status SetExecutorStructFn(void* library_handle) {
   TFTPU_SET_FN(executor_fn, TpuPlatform_TpuMemoryLimit);
   TFTPU_SET_FN(executor_fn, TpuPlatform_ShouldRegisterTpuDeviceToDeviceCopy);
   TFTPU_SET_FN(executor_fn, TpuPlatform_GetTopologyPtr);
+  TFTPU_SET_FN(executor_fn, TpuPlatform_GetHostLocation);
 
   TFTPU_SET_FN(executor_fn, TpuExecutor_Init);
   TFTPU_SET_FN(executor_fn, TpuExecutor_Free);
@@ -132,6 +135,7 @@ tensorflow::Status SetExecutorStructFn(void* library_handle) {
 
   TFTPU_SET_FN(executor_fn, TpuStatus_New);
   TFTPU_SET_FN(executor_fn, TpuStatus_Create);
+  TFTPU_SET_FN(executor_fn, TpuStatus_Set);
   TFTPU_SET_FN(executor_fn, TpuStatus_Free);
   TFTPU_SET_FN(executor_fn, TpuStatus_Message);
   TFTPU_SET_FN(executor_fn, TpuStatus_Code);
@@ -157,6 +161,13 @@ tensorflow::Status SetExecutorStructFn(void* library_handle) {
   TFTPU_SET_FN(executor_fn, TpuTransferManager_TransferLiteralFromDevice);
   TFTPU_SET_FN(executor_fn, TpuTransferManager_GetByteSizeRequirement);
   TFTPU_SET_FN(executor_fn, TpuTransferManager_WriteSingleTupleIndexTable);
+  TFTPU_SET_FN(executor_fn, TpuTransferManager_GetInfeedLayout);
+  TFTPU_SET_FN(executor_fn, TpuTransferManager_LinearizeToBuffers);
+  TFTPU_SET_FN(executor_fn, TpuTransferManager_FreeBuffers);
+  TFTPU_SET_FN(executor_fn, TpuTransferManager_TransferLiteralToInfeed);
+  TFTPU_SET_FN(executor_fn, TpuTransferManager_TransferBuffersToInfeed);
+  TFTPU_SET_FN(executor_fn, TpuTransferManager_TransferLiteralFromOutfeed);
+  TFTPU_SET_FN(executor_fn, TpuTransferManager_ResetDevices);
 
   TFTPU_SET_FN(executor_fn, TpuComputationPlacer_New);
   TFTPU_SET_FN(executor_fn, TpuComputationPlacer_Free);
@@ -168,11 +179,20 @@ tensorflow::Status SetExecutorStructFn(void* library_handle) {
   TFTPU_SET_FN(executor_fn, TpuTopology_ChipBounds_Z);
   TFTPU_SET_FN(executor_fn, TpuTopology_HasChip);
   TFTPU_SET_FN(executor_fn, TpuTopology_Core);
-  TFTPU_SET_FN(executor_fn, TpuCoreLocation_ChipCoordinates_X);
-  TFTPU_SET_FN(executor_fn, TpuCoreLocation_ChipCoordinates_Y);
-  TFTPU_SET_FN(executor_fn, TpuCoreLocation_ChipCoordinates_Z);
+  TFTPU_SET_FN(executor_fn, TpuTopology_NumCores);
+  TFTPU_SET_FN(executor_fn, TpuTopology_Cores);
+  TFTPU_SET_FN(executor_fn, TpuTopology_IdForHost);
+  TFTPU_SET_FN(executor_fn, TpuTopology_Version);
+
+  TFTPU_SET_FN(executor_fn, TpuCoreLocation_ChipCoordinates);
+  TFTPU_SET_FN(executor_fn, TpuCoreLocation_HostCoordinates);
   TFTPU_SET_FN(executor_fn, TpuCoreLocation_Index);
   TFTPU_SET_FN(executor_fn, TpuCoreLocation_Id);
+
+  TFTPU_SET_FN(executor_fn, TpuHostLocation_Id);
+
+  TFTPU_SET_FN(executor_fn, TpuCompiler_New);
+  TFTPU_SET_FN(executor_fn, TpuCompiler_Free);
 
   TFTPU_SET_FN(executor_fn, TpuCompiler_RunHloPasses);
   TFTPU_SET_FN(executor_fn, TpuCompiler_RunBackend);
@@ -180,6 +200,9 @@ tensorflow::Status SetExecutorStructFn(void* library_handle) {
   TFTPU_SET_FN(executor_fn, TpuCompiler_ShapeSize);
   TFTPU_SET_FN(executor_fn, TpuExecutable_ExecuteAsyncOnStream);
   TFTPU_SET_FN(executor_fn, TpuExecutable_Free);
+
+  TFTPU_SET_FN(executor_fn, XlaShapeToTpuShapeRepresentation);
+  TFTPU_SET_FN(executor_fn, XlaShapeToTpuPaddedShape);
 
   return tensorflow::Status::OK();
 }
@@ -202,7 +225,6 @@ tensorflow::Status SetTpuUtilStructFns(void* library_handle) {
   TFTPU_SET_FN(util_fn, TpuTopology_AvailableCoreCount);
   TFTPU_SET_FN(util_fn, TpuCompile_IsTpuCompilationEnabled);
   TFTPU_SET_FN(util_fn, TpuCompile_ShouldTpuCompileOpIgnoreCancellation);
-  TFTPU_SET_FN(util_fn, TpuCompile_ToTpuShapeRepresentation);
   TFTPU_SET_FN(util_fn, TpuCompile_CreateCompilationCacheKey);
   TFTPU_SET_FN(util_fn, TpuCompile_DestroyCompilationCacheKey);
   TFTPU_SET_FN(util_fn, TpuCompile_CreateGuaranteedConstFingerprint);
